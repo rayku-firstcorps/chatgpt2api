@@ -1,6 +1,6 @@
 "use client";
 
-import { Cloud, LoaderCircle, PlugZap, RefreshCw, Save } from "lucide-react";
+import { Activity, BellRing, Cloud, LoaderCircle, PlugZap, RefreshCw, Save, Send, ShieldCheck, TimerReset, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -14,6 +14,34 @@ import type { ImageStorageMode } from "@/lib/api";
 import { testProxy, type ProxyTestResult } from "@/lib/api";
 
 import { useSettingsStore } from "../store";
+
+function formatGuardTime(value?: string | null) {
+  if (!value) {
+    return "尚未检查";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString();
+}
+
+function formatDuration(seconds: number) {
+  if (!seconds) {
+    return "无";
+  }
+  const minutes = Math.ceil(seconds / 60);
+  return minutes >= 60 ? `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分钟` : `${minutes} 分钟`;
+}
+
+const feishuEventLabels = [
+  ["triggered", "已自动触发补号"],
+  ["skipped_register_config", "注册机配置不完整"],
+  ["error", "健康检查异常"],
+  ["healthy_recovered", "账号池恢复健康"],
+  ["skipped_cooldown", "冷却期跳过"],
+  ["skipped_register_running", "注册机运行中跳过"],
+] as const;
 
 export function ConfigCard() {
   const [isTestingProxy, setIsTestingProxy] = useState(false);
@@ -34,12 +62,36 @@ export function ConfigCard() {
   const setGlobalSystemPrompt = useSettingsStore((state) => state.setGlobalSystemPrompt);
   const setSensitiveWordsText = useSettingsStore((state) => state.setSensitiveWordsText);
   const setAIReviewField = useSettingsStore((state) => state.setAIReviewField);
+  const setAccountPoolGuardField = useSettingsStore((state) => state.setAccountPoolGuardField);
+  const accountPoolGuard = useSettingsStore((state) => state.accountPoolGuard);
+  const feishuAlert = useSettingsStore((state) => state.feishuAlert);
+  const setFeishuAlertField = useSettingsStore((state) => state.setFeishuAlertField);
+  const setFeishuAlertEvent = useSettingsStore((state) => state.setFeishuAlertEvent);
+  const testFeishuAlert = useSettingsStore((state) => state.testFeishuAlert);
+  const isTestingFeishuAlert = useSettingsStore((state) => state.isTestingFeishuAlert);
   const setImageStorageField = useSettingsStore((state) => state.setImageStorageField);
   const testImageStorage = useSettingsStore((state) => state.testImageStorage);
   const syncImagesToWebDAV = useSettingsStore((state) => state.syncImagesToWebDAV);
   const isTestingImageStorage = useSettingsStore((state) => state.isTestingImageStorage);
   const isSyncingImageStorage = useSettingsStore((state) => state.isSyncingImageStorage);
   const saveConfig = useSettingsStore((state) => state.saveConfig);
+  const guardState = accountPoolGuard?.state;
+  const guardRate = Number(guardState?.last_alive_rate || 0);
+  const guardThreshold = Number(config?.account_pool_guard?.alive_rate_threshold || 20);
+  const guardIsWarning = Boolean(guardState?.last_checked_at) && guardRate < guardThreshold;
+  const guardTone = guardState?.last_action === "triggered"
+    ? "border-sky-200 bg-sky-50 text-sky-800"
+    : guardIsWarning
+      ? "border-amber-200 bg-amber-50 text-amber-800"
+      : "border-emerald-200 bg-emerald-50 text-emerald-800";
+  const feishuState = feishuAlert?.state;
+  const feishuTone = !config?.feishu_alert?.enabled
+    ? "border-stone-200 bg-stone-50 text-stone-600"
+    : !config.feishu_alert.webhook_configured && !config.feishu_alert.webhook_url
+      ? "border-amber-200 bg-amber-50 text-amber-800"
+      : feishuState?.last_status === "failed"
+        ? "border-rose-200 bg-rose-50 text-rose-800"
+        : "border-emerald-200 bg-emerald-50 text-emerald-800";
 
   const handleTestProxy = async () => {
     const candidate = String(config?.proxy || "").trim();
@@ -183,6 +235,290 @@ export function ConfigCard() {
             />
             自动移除限流账号
           </label>
+          <div className="space-y-4 rounded-xl border border-stone-200 bg-white px-4 py-3 md:col-span-2">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="space-y-1">
+                <label className="flex items-center gap-2 text-sm font-medium text-stone-800">
+                  <ShieldCheck className="size-4 text-stone-500" />
+                  账号池健康守护
+                </label>
+                <p className="text-xs leading-6 text-stone-500">
+                  系统会按配置周期检查账号池可用账号占比；低于阈值且注册机未运行时，将自动启动注册流程。
+                </p>
+              </div>
+              <label className="flex h-9 shrink-0 items-center gap-2 rounded-lg border border-stone-200 bg-stone-50 px-3 text-sm text-stone-700">
+                <Checkbox
+                  checked={Boolean(config?.account_pool_guard?.enabled)}
+                  onCheckedChange={(checked) => setAccountPoolGuardField("enabled", Boolean(checked))}
+                />
+                启用
+              </label>
+            </div>
+            <div className={`rounded-lg border px-3 py-3 text-xs leading-6 ${guardTone}`}>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <span className="font-medium">{guardState?.last_message || "等待首次健康检查"}</span>
+                <span className="inline-flex items-center gap-1">
+                  <TimerReset className="size-3.5" />
+                  冷却剩余：{formatDuration(Number(accountPoolGuard?.cooldown_remaining_seconds || 0))}
+                </span>
+              </div>
+              <div className="mt-2 grid gap-2 text-stone-600 sm:grid-cols-2 lg:grid-cols-4">
+                <span>最近检查：{formatGuardTime(guardState?.last_checked_at)}</span>
+                <span>账号总数：{guardState?.last_total_accounts ?? 0}</span>
+                <span>存活账号：{guardState?.last_alive_accounts ?? 0}</span>
+                <span>存活率：{guardRate.toFixed(1)}% / 阈值 {guardThreshold}%</span>
+                <span>最近触发：{formatGuardTime(guardState?.last_triggered_at)}</span>
+                <span className="inline-flex items-center gap-1">
+                  <Activity className="size-3.5" />
+                  注册机：{accountPoolGuard?.register_running ? "运行中" : "空闲"}
+                </span>
+              </div>
+            </div>
+            <div className="grid gap-4 md:grid-cols-4">
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">检查间隔</label>
+                <Input
+                  type="number"
+                  min={1}
+                  value={String(config?.account_pool_guard?.check_interval_minutes || "")}
+                  onChange={(event) => setAccountPoolGuardField("check_interval_minutes", event.target.value)}
+                  className="h-10 rounded-xl border-stone-200 bg-white"
+                />
+                <p className="text-xs text-stone-500">单位分钟。</p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">存活率阈值</label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={String(config?.account_pool_guard?.alive_rate_threshold || "")}
+                  onChange={(event) => setAccountPoolGuardField("alive_rate_threshold", event.target.value)}
+                  className="h-10 rounded-xl border-stone-200 bg-white"
+                />
+                <p className="text-xs text-stone-500">低于该百分比触发。</p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">最小样本数</label>
+                <Input
+                  type="number"
+                  min={0}
+                  value={String(config?.account_pool_guard?.min_total_accounts ?? "")}
+                  onChange={(event) => setAccountPoolGuardField("min_total_accounts", event.target.value)}
+                  className="h-10 rounded-xl border-stone-200 bg-white"
+                />
+                <p className="text-xs text-stone-500">账号数低于此值不触发。</p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">触发冷却</label>
+                <Input
+                  type="number"
+                  min={0}
+                  value={String(config?.account_pool_guard?.trigger_cooldown_minutes ?? "")}
+                  onChange={(event) => setAccountPoolGuardField("trigger_cooldown_minutes", event.target.value)}
+                  className="h-10 rounded-xl border-stone-200 bg-white"
+                />
+                <p className="text-xs text-stone-500">单位分钟。</p>
+              </div>
+            </div>
+            <div className="grid gap-4 md:grid-cols-3">
+              <label className="flex items-center gap-3 rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-700">
+                <Checkbox
+                  checked={Boolean(config?.account_pool_guard?.allow_empty_pool_trigger)}
+                  onCheckedChange={(checked) => setAccountPoolGuardField("allow_empty_pool_trigger", Boolean(checked))}
+                />
+                允许空池触发
+              </label>
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">触发后的注册目标</label>
+                <Select
+                  value={String(config?.account_pool_guard?.register_mode || "available")}
+                  onValueChange={(value) => setAccountPoolGuardField("register_mode", value)}
+                >
+                  <SelectTrigger className="h-10 rounded-xl border-stone-200 bg-white shadow-none">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="available">补充正常账号</SelectItem>
+                    <SelectItem value="quota">补充剩余额度</SelectItem>
+                    <SelectItem value="total">沿用注册机总数</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {config?.account_pool_guard?.register_mode === "quota" ? (
+                <div className="space-y-2">
+                  <label className="text-sm text-stone-700">目标剩余额度</label>
+                  <Input
+                    type="number"
+                    min={1}
+                    value={String(config?.account_pool_guard?.register_target_quota || "")}
+                    onChange={(event) => setAccountPoolGuardField("register_target_quota", event.target.value)}
+                    className="h-10 rounded-xl border-stone-200 bg-white"
+                  />
+                </div>
+              ) : config?.account_pool_guard?.register_mode === "total" ? (
+                <div className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-xs leading-6 text-stone-500">
+                  自动触发时沿用注册机当前总数配置，不覆盖邮箱、代理、线程数。
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <label className="text-sm text-stone-700">目标正常账号数</label>
+                  <Input
+                    type="number"
+                    min={1}
+                    value={String(config?.account_pool_guard?.register_target_available || "")}
+                    onChange={(event) => setAccountPoolGuardField("register_target_available", event.target.value)}
+                    className="h-10 rounded-xl border-stone-200 bg-white"
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="space-y-4 rounded-xl border border-stone-200 bg-white px-4 py-3 md:col-span-2">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="space-y-1">
+                <label className="flex items-center gap-2 text-sm font-medium text-stone-800">
+                  <BellRing className="size-4 text-stone-500" />
+                  飞书告警
+                </label>
+                <p className="text-xs leading-6 text-stone-500">
+                  将账号池低存活、补号触发、配置异常和恢复状态推送到飞书群，卡片只包含摘要指标。
+                </p>
+              </div>
+              <label className="flex h-9 shrink-0 items-center gap-2 rounded-lg border border-stone-200 bg-stone-50 px-3 text-sm text-stone-700">
+                <Checkbox
+                  checked={Boolean(config?.feishu_alert?.enabled)}
+                  onCheckedChange={(checked) => setFeishuAlertField("enabled", Boolean(checked))}
+                />
+                启用
+              </label>
+            </div>
+            <div className={`rounded-lg border px-3 py-3 text-xs leading-6 ${feishuTone}`}>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <span className="font-medium">
+                  {!config?.feishu_alert?.enabled
+                    ? "飞书告警未启用"
+                    : feishuState?.last_status === "failed"
+                      ? `最近发送失败：${feishuState.last_error || feishuState.last_response_message || "未知错误"}`
+                      : feishuState?.last_sent_at
+                        ? "最近一次飞书告警发送成功"
+                        : "等待首次飞书告警"}
+                </span>
+                <span>最近发送：{formatGuardTime(feishuState?.last_sent_at)}</span>
+              </div>
+              <div className="mt-2 grid gap-2 text-stone-600 sm:grid-cols-2 lg:grid-cols-4">
+                <span>事件：{feishuState?.last_event_type || "无"}</span>
+                <span>结果：{feishuState?.last_status || "idle"}</span>
+                <span>返回码：{feishuState?.last_response_code ?? 0}</span>
+                <span>Webhook：{config?.feishu_alert?.webhook_configured ? "已配置" : "未配置"}</span>
+              </div>
+            </div>
+            <div className="grid gap-4 md:grid-cols-3">
+              <div className="space-y-2 md:col-span-2">
+                <label className="text-sm text-stone-700">Webhook 地址</label>
+                <Input
+                  type="password"
+                  value={String(config?.feishu_alert?.webhook_url || "")}
+                  onChange={(event) => setFeishuAlertField("webhook_url", event.target.value)}
+                  placeholder={config?.feishu_alert?.webhook_configured ? "已配置，留空表示沿用原值" : "https://open.feishu.cn/open-apis/bot/v2/hook/..."}
+                  className="h-10 rounded-xl border-stone-200 bg-white"
+                />
+                <p className="text-xs text-stone-500">保存后会脱敏展示，不会在前端返回完整地址。</p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">安全关键词</label>
+                <Input
+                  value={String(config?.feishu_alert?.keyword || "")}
+                  onChange={(event) => setFeishuAlertField("keyword", event.target.value)}
+                  placeholder="账号池告警"
+                  className="h-10 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
+              <div className="space-y-2 md:col-span-2">
+                <label className="text-sm text-stone-700">签名密钥</label>
+                <Input
+                  type="password"
+                  value={String(config?.feishu_alert?.secret || "")}
+                  onChange={(event) => setFeishuAlertField("secret", event.target.value)}
+                  placeholder={config?.feishu_alert?.secret_configured ? "已配置，留空表示沿用原值" : "飞书机器人签名密钥，可留空"}
+                  className="h-10 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
+              <div className="flex items-end gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700"
+                  onClick={() => {
+                    setFeishuAlertField("secret", "");
+                    setFeishuAlertField("clear_secret", true);
+                  }}
+                  disabled={!config?.feishu_alert?.secret_configured}
+                >
+                  <Trash2 className="size-4" />
+                  清空密钥
+                </Button>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">告警冷却</label>
+                <Input
+                  type="number"
+                  min={0}
+                  value={String(config?.feishu_alert?.alert_cooldown_minutes ?? "")}
+                  onChange={(event) => setFeishuAlertField("alert_cooldown_minutes", event.target.value)}
+                  className="h-10 rounded-xl border-stone-200 bg-white"
+                />
+                <p className="text-xs text-stone-500">同类事件冷却，单位分钟。</p>
+              </div>
+              <label className="flex items-center gap-3 rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-700">
+                <Checkbox
+                  checked={Boolean(config?.feishu_alert?.recovery_notify)}
+                  onCheckedChange={(checked) => setFeishuAlertField("recovery_notify", Boolean(checked))}
+                />
+                恢复健康通知
+              </label>
+              <label className="flex items-center gap-3 rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-700">
+                <Checkbox
+                  checked={Boolean(config?.feishu_alert?.include_register_status)}
+                  onCheckedChange={(checked) => setFeishuAlertField("include_register_status", Boolean(checked))}
+                />
+                包含注册机状态
+              </label>
+              <label className="flex items-center gap-3 rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-700">
+                <Checkbox
+                  checked={Boolean(config?.feishu_alert?.include_manage_link)}
+                  onCheckedChange={(checked) => setFeishuAlertField("include_manage_link", Boolean(checked))}
+                />
+                包含管理入口
+              </label>
+            </div>
+            <div className="space-y-3 rounded-xl border border-stone-200 bg-stone-50 px-4 py-3">
+              <label className="text-sm text-stone-700">告警事件</label>
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {feishuEventLabels.map(([event, label]) => (
+                  <label key={event} className="flex items-center gap-2 text-sm text-stone-700">
+                    <Checkbox
+                      checked={Boolean(config?.feishu_alert?.notify_events?.includes(event))}
+                      onCheckedChange={(checked) => setFeishuAlertEvent(event, Boolean(checked))}
+                    />
+                    {label}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div className="flex justify-end">
+              <Button
+                type="button"
+                variant="outline"
+                className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700"
+                onClick={() => void testFeishuAlert()}
+                disabled={isTestingFeishuAlert}
+              >
+                {isTestingFeishuAlert ? <LoaderCircle className="size-4 animate-spin" /> : <Send className="size-4" />}
+                测试发送
+              </Button>
+            </div>
+          </div>
           <div className="space-y-3 rounded-xl border border-stone-200 bg-white px-4 py-3">
             <div>
               <label className="text-sm text-stone-700">控制台日志级别</label>

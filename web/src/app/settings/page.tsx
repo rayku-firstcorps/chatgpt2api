@@ -20,6 +20,7 @@ function SettingsDataController() {
   const initialize = useSettingsStore((state) => state.initialize);
   const loadPools = useSettingsStore((state) => state.loadPools);
   const loadBackups = useSettingsStore((state) => state.loadBackups);
+  const loadAccountPoolGuard = useSettingsStore((state) => state.loadAccountPoolGuard);
   const pools = useSettingsStore((state) => state.pools);
   const backupState = useSettingsStore((state) => state.backupState);
 
@@ -55,6 +56,13 @@ function SettingsDataController() {
     }, 3000);
     return () => window.clearInterval(timer);
   }, [backupState?.running, loadBackups]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void loadAccountPoolGuard(true);
+    }, 10000);
+    return () => window.clearInterval(timer);
+  }, [loadAccountPoolGuard]);
 
   return null;
 }

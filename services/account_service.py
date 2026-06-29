@@ -219,6 +219,21 @@ class AccountService:
         with self._lock:
             return [dict(item) for item in self._accounts.values()]
 
+    def get_pool_health(self) -> dict[str, float | int]:
+        with self._lock:
+            total_accounts = len(self._accounts)
+            alive_accounts = sum(
+                1
+                for item in self._accounts.values()
+                if self._is_image_account_available(item)
+            )
+        alive_rate = round(alive_accounts * 100 / total_accounts, 1) if total_accounts else 0.0
+        return {
+            "total_accounts": total_accounts,
+            "alive_accounts": alive_accounts,
+            "alive_rate": alive_rate,
+        }
+
     def list_limited_tokens(self) -> list[str]:
         with self._lock:
             return [

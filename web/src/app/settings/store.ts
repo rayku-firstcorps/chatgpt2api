@@ -7,6 +7,7 @@ import {
   createCPAPool,
   deleteBackup,
   deleteCPAPool,
+  fetchAccountPoolGuard,
   fetchCPAPoolFiles,
   fetchCPAPools,
   fetchBackups,
@@ -19,10 +20,13 @@ import {
   startCPAImport,
   stopRegister,
   testBackupConnection,
+  testFeishuAlert,
   testImageStorageConnection,
   updateCPAPool,
   updateRegisterConfig,
   updateSettingsConfig,
+  type AccountPoolGuardConfig,
+  type AccountPoolGuardStatus,
   type BackupItem,
   type BackupSettings,
   type BackupState,
@@ -30,6 +34,9 @@ import {
   type CPARemoteFile,
   type ImageStorageMode,
   type ImageStorageSettings,
+  type FeishuAlertEvent,
+  type FeishuAlertSettings,
+  type FeishuAlertStatus,
   type RegisterConfig,
   type SettingsConfig,
 } from "@/lib/api";
@@ -38,7 +45,42 @@ export const PAGE_SIZE_OPTIONS = ["50", "100", "200"] as const;
 
 export type PageSizeOption = (typeof PAGE_SIZE_OPTIONS)[number];
 
+const DEFAULT_FEISHU_EVENTS: FeishuAlertEvent[] = [
+  "triggered",
+  "skipped_register_config",
+  "error",
+  "healthy_recovered",
+];
+
+const ALL_FEISHU_EVENTS: FeishuAlertEvent[] = [
+  "triggered",
+  "skipped_register_config",
+  "error",
+  "skipped_register_running",
+  "skipped_cooldown",
+  "healthy_recovered",
+  "healthy",
+  "skipped_min_sample",
+  "disabled",
+];
+
 function normalizeConfig(config: SettingsConfig): SettingsConfig {
+  const accountPoolGuard = typeof config.account_pool_guard === "object" && config.account_pool_guard
+    ? config.account_pool_guard as AccountPoolGuardConfig
+    : {
+      enabled: false,
+      check_interval_minutes: 5,
+      alive_rate_threshold: 20,
+      min_total_accounts: 5,
+      trigger_cooldown_minutes: 30,
+      allow_empty_pool_trigger: false,
+      register_mode: "available",
+      register_target_available: 10,
+      register_target_quota: 100,
+    };
+  const registerMode = ["available", "quota", "total"].includes(String(accountPoolGuard.register_mode))
+    ? accountPoolGuard.register_mode
+    : "available";
   const imageStorage = typeof config.image_storage === "object" && config.image_storage
     ? config.image_storage as ImageStorageSettings
     : {
@@ -49,6 +91,21 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
       webdav_password: "",
       webdav_root_path: "chatgpt2api/images",
       public_base_url: "",
+    };
+  const feishuAlert = typeof config.feishu_alert === "object" && config.feishu_alert
+    ? config.feishu_alert as FeishuAlertSettings
+    : {
+      enabled: false,
+      webhook_url: "",
+      webhook_configured: false,
+      secret: "",
+      secret_configured: false,
+      keyword: "账号池告警",
+      notify_events: DEFAULT_FEISHU_EVENTS,
+      alert_cooldown_minutes: 30,
+      recovery_notify: true,
+      include_register_status: true,
+      include_manage_link: true,
     };
   const imageStorageMode: ImageStorageMode = imageStorage.enabled && imageStorage.mode === "both"
     ? "both"
@@ -100,6 +157,33 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
       api_key: String(config.ai_review?.api_key || ""),
       model: String(config.ai_review?.model || ""),
       prompt: String(config.ai_review?.prompt || ""),
+    },
+    account_pool_guard: {
+      enabled: Boolean(accountPoolGuard.enabled),
+      check_interval_minutes: Number(accountPoolGuard.check_interval_minutes || 5),
+      alive_rate_threshold: Number(accountPoolGuard.alive_rate_threshold || 20),
+      min_total_accounts: Number(accountPoolGuard.min_total_accounts ?? 5),
+      trigger_cooldown_minutes: Number(accountPoolGuard.trigger_cooldown_minutes ?? 30),
+      allow_empty_pool_trigger: Boolean(accountPoolGuard.allow_empty_pool_trigger),
+      register_mode: registerMode as AccountPoolGuardConfig["register_mode"],
+      register_target_available: Number(accountPoolGuard.register_target_available || 10),
+      register_target_quota: Number(accountPoolGuard.register_target_quota || 100),
+    },
+    feishu_alert: {
+      enabled: Boolean(feishuAlert.enabled),
+      webhook_url: String(feishuAlert.webhook_url || "").includes("****") ? "" : String(feishuAlert.webhook_url || ""),
+      webhook_configured: Boolean(feishuAlert.webhook_configured),
+      secret: "",
+      secret_configured: Boolean(feishuAlert.secret_configured),
+      clear_secret: Boolean(feishuAlert.clear_secret),
+      keyword: String(feishuAlert.keyword || "账号池告警"),
+      notify_events: Array.isArray(feishuAlert.notify_events)
+        ? feishuAlert.notify_events.filter((event): event is FeishuAlertEvent => ALL_FEISHU_EVENTS.includes(event as FeishuAlertEvent))
+        : DEFAULT_FEISHU_EVENTS,
+      alert_cooldown_minutes: Number(feishuAlert.alert_cooldown_minutes ?? 30),
+      recovery_notify: Boolean(feishuAlert.recovery_notify ?? true),
+      include_register_status: Boolean(feishuAlert.include_register_status ?? true),
+      include_manage_link: Boolean(feishuAlert.include_manage_link ?? true),
     },
     image_storage: {
       enabled: Boolean(imageStorage.enabled),
@@ -156,6 +240,8 @@ function normalizeFiles(items: CPARemoteFile[]) {
 
 type SettingsStore = {
   config: SettingsConfig | null;
+  accountPoolGuard: AccountPoolGuardStatus | null;
+  feishuAlert: FeishuAlertStatus | null;
   isLoadingConfig: boolean;
   isSavingConfig: boolean;
   backups: BackupItem[];
@@ -166,6 +252,7 @@ type SettingsStore = {
   isTestingBackup: boolean;
   isTestingImageStorage: boolean;
   isSyncingImageStorage: boolean;
+  isTestingFeishuAlert: boolean;
 
   registerConfig: RegisterConfig | null;
   isLoadingRegister: boolean;
@@ -212,6 +299,11 @@ type SettingsStore = {
   setGlobalSystemPrompt: (value: string) => void;
   setSensitiveWordsText: (value: string) => void;
   setAIReviewField: (key: "enabled" | "base_url" | "api_key" | "model" | "prompt", value: string | boolean) => void;
+  setAccountPoolGuardField: (key: keyof AccountPoolGuardConfig, value: string | boolean) => void;
+  loadAccountPoolGuard: (silent?: boolean) => Promise<void>;
+  setFeishuAlertField: (key: keyof FeishuAlertSettings, value: string | boolean) => void;
+  setFeishuAlertEvent: (event: FeishuAlertEvent, enabled: boolean) => void;
+  testFeishuAlert: () => Promise<void>;
   setImageStorageField: (key: keyof ImageStorageSettings, value: string | boolean) => void;
   testImageStorage: () => Promise<void>;
   syncImagesToWebDAV: () => Promise<void>;
@@ -258,6 +350,8 @@ type SettingsStore = {
 
 export const useSettingsStore = create<SettingsStore>((set, get) => ({
   config: null,
+  accountPoolGuard: null,
+  feishuAlert: null,
   isLoadingConfig: true,
   isSavingConfig: false,
   backups: [],
@@ -268,6 +362,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   isTestingBackup: false,
   isTestingImageStorage: false,
   isSyncingImageStorage: false,
+  isTestingFeishuAlert: false,
 
   registerConfig: null,
   isLoadingRegister: true,
@@ -318,6 +413,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       const normalized = normalizeConfig(data.config);
       set({
         config: normalized,
+        accountPoolGuard: data.account_pool_guard ?? null,
+        feishuAlert: data.feishu_alert ?? null,
       });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载系统配置失败");
@@ -353,6 +450,36 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           model: String(config.ai_review?.model || "").trim(),
           prompt: String(config.ai_review?.prompt || "").trim(),
         },
+        account_pool_guard: {
+          enabled: Boolean(config.account_pool_guard?.enabled),
+          check_interval_minutes: Math.max(1, Number(config.account_pool_guard?.check_interval_minutes) || 5),
+          alive_rate_threshold: Math.min(100, Math.max(1, Number(config.account_pool_guard?.alive_rate_threshold) || 20)),
+          min_total_accounts: Math.max(0, Number(config.account_pool_guard?.min_total_accounts) || 0),
+          trigger_cooldown_minutes: Math.max(0, Number(config.account_pool_guard?.trigger_cooldown_minutes) || 0),
+          allow_empty_pool_trigger: Boolean(config.account_pool_guard?.allow_empty_pool_trigger),
+          register_mode: ["available", "quota", "total"].includes(String(config.account_pool_guard?.register_mode))
+            ? config.account_pool_guard!.register_mode
+            : "available",
+          register_target_available: Math.max(1, Number(config.account_pool_guard?.register_target_available) || 10),
+          register_target_quota: Math.max(1, Number(config.account_pool_guard?.register_target_quota) || 100),
+        },
+        feishu_alert: {
+          enabled: Boolean(config.feishu_alert?.enabled),
+          webhook_url: String(config.feishu_alert?.webhook_url || "").includes("****")
+            ? ""
+            : String(config.feishu_alert?.webhook_url || "").trim(),
+          webhook_configured: Boolean(config.feishu_alert?.webhook_configured),
+          secret: String(config.feishu_alert?.secret || "").trim(),
+          secret_configured: Boolean(config.feishu_alert?.secret_configured),
+          clear_secret: Boolean(config.feishu_alert?.clear_secret),
+          keyword: String(config.feishu_alert?.keyword || "账号池告警").trim() || "账号池告警",
+          notify_events: (config.feishu_alert?.notify_events || DEFAULT_FEISHU_EVENTS)
+            .filter((event): event is FeishuAlertEvent => ALL_FEISHU_EVENTS.includes(event as FeishuAlertEvent)),
+          alert_cooldown_minutes: Math.max(0, Number(config.feishu_alert?.alert_cooldown_minutes) || 0),
+          recovery_notify: Boolean(config.feishu_alert?.recovery_notify),
+          include_register_status: Boolean(config.feishu_alert?.include_register_status),
+          include_manage_link: Boolean(config.feishu_alert?.include_manage_link),
+        },
         image_storage: {
           enabled: Boolean(config.image_storage?.enabled),
           mode: config.image_storage?.enabled && ["webdav", "both"].includes(String(config.image_storage?.mode)) ? config.image_storage.mode : "local",
@@ -376,6 +503,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       });
       set({
         config: normalizeConfig(data.config),
+        accountPoolGuard: data.account_pool_guard ?? get().accountPoolGuard,
+        feishuAlert: data.feishu_alert ?? get().feishuAlert,
       });
       toast.success("配置已保存");
       return true;
@@ -469,6 +598,101 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setAIReviewField: (key, value) => {
     set((state) => state.config ? { config: { ...state.config, ai_review: { ...(state.config.ai_review || {}), [key]: value } } } : {});
+  },
+
+  setAccountPoolGuardField: (key, value) => {
+    set((state) => {
+      if (!state.config?.account_pool_guard) {
+        return {};
+      }
+      return {
+        config: {
+          ...state.config,
+          account_pool_guard: {
+            ...state.config.account_pool_guard,
+            [key]: value,
+          },
+        },
+      };
+    });
+  },
+
+  loadAccountPoolGuard: async (silent = false) => {
+    try {
+      const data = await fetchAccountPoolGuard();
+      set({ accountPoolGuard: data.account_pool_guard });
+    } catch (error) {
+      if (!silent) {
+        toast.error(error instanceof Error ? error.message : "加载账号池健康守护状态失败");
+      }
+    }
+  },
+
+  setFeishuAlertField: (key, value) => {
+    set((state) => {
+      if (!state.config?.feishu_alert) {
+        return {};
+      }
+      return {
+        config: {
+          ...state.config,
+          feishu_alert: {
+            ...state.config.feishu_alert,
+            [key]: value,
+          },
+        },
+      };
+    });
+  },
+
+  setFeishuAlertEvent: (event, enabled) => {
+    set((state) => {
+      if (!state.config?.feishu_alert) {
+        return {};
+      }
+      const current = new Set(state.config.feishu_alert.notify_events || []);
+      if (enabled) current.add(event);
+      else current.delete(event);
+      return {
+        config: {
+          ...state.config,
+          feishu_alert: {
+            ...state.config.feishu_alert,
+            notify_events: Array.from(current) as FeishuAlertEvent[],
+          },
+        },
+      };
+    });
+  },
+
+  testFeishuAlert: async () => {
+    const feishuAlert = get().config?.feishu_alert;
+    if (!feishuAlert) {
+      return;
+    }
+    const webhookUrl = String(feishuAlert.webhook_url || "").trim();
+    if (!webhookUrl && !feishuAlert.webhook_configured) {
+      toast.error("请先填写飞书 Webhook 地址");
+      return;
+    }
+    set({ isTestingFeishuAlert: true });
+    try {
+      const data = await testFeishuAlert({
+        webhook_url: webhookUrl,
+        secret: String(feishuAlert.secret || "").trim(),
+        keyword: String(feishuAlert.keyword || "账号池告警").trim(),
+      });
+      set({ feishuAlert: data.feishu_alert });
+      if (data.result.ok) {
+        toast.success("飞书测试卡片已发送");
+      } else {
+        toast.error(`飞书测试发送失败：${data.result.error || data.result.message || data.result.status}`);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "飞书测试发送失败");
+    } finally {
+      set({ isTestingFeishuAlert: false });
+    }
   },
 
   setImageStorageField: (key, value) => {

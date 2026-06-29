@@ -93,7 +93,86 @@ export type SettingsConfig = {
   backup?: BackupSettings;
   backup_state?: BackupState;
   image_storage?: ImageStorageSettings;
+  account_pool_guard?: AccountPoolGuardConfig;
+  feishu_alert?: FeishuAlertSettings;
   [key: string]: unknown;
+};
+
+export type AccountPoolGuardConfig = {
+  enabled: boolean;
+  check_interval_minutes: number | string;
+  alive_rate_threshold: number | string;
+  min_total_accounts: number | string;
+  trigger_cooldown_minutes: number | string;
+  allow_empty_pool_trigger: boolean;
+  register_mode: "available" | "quota" | "total";
+  register_target_available: number | string;
+  register_target_quota: number | string;
+};
+
+export type AccountPoolGuardState = {
+  last_checked_at?: string | null;
+  last_triggered_at?: string | null;
+  last_alive_rate: number;
+  last_total_accounts: number;
+  last_alive_accounts: number;
+  last_action: string;
+  last_message: string;
+};
+
+export type AccountPoolGuardStatus = {
+  config: AccountPoolGuardConfig;
+  state: AccountPoolGuardState;
+  cooldown_remaining_seconds: number;
+  register_running: boolean;
+};
+
+export type FeishuAlertEvent =
+  | "triggered"
+  | "skipped_register_config"
+  | "error"
+  | "skipped_register_running"
+  | "skipped_cooldown"
+  | "healthy_recovered"
+  | "healthy"
+  | "skipped_min_sample"
+  | "disabled";
+
+export type FeishuAlertSettings = {
+  enabled: boolean;
+  webhook_url: string;
+  webhook_configured?: boolean;
+  secret: string;
+  secret_configured?: boolean;
+  clear_secret?: boolean;
+  keyword: string;
+  notify_events: FeishuAlertEvent[];
+  alert_cooldown_minutes: number | string;
+  recovery_notify: boolean;
+  include_register_status: boolean;
+  include_manage_link: boolean;
+};
+
+export type FeishuAlertState = {
+  last_sent_at?: string | null;
+  last_event_type: string;
+  last_fingerprint: string;
+  last_status: string;
+  last_error: string;
+  last_response_code: number;
+  last_response_message: string;
+  last_recovered_at?: string | null;
+  recent_events: Array<{
+    sent_at?: string | null;
+    event_type: string;
+    status: string;
+    fingerprint: string;
+  }>;
+};
+
+export type FeishuAlertStatus = {
+  config: FeishuAlertSettings;
+  state: FeishuAlertState;
 };
 
 export type ImageStorageMode = "local" | "webdav" | "both";
@@ -449,13 +528,24 @@ export async function fetchImageTasks(ids: string[]) {
 }
 
 export async function fetchSettingsConfig() {
-  return httpRequest<{ config: SettingsConfig }>("/api/settings");
+  return httpRequest<{ config: SettingsConfig; account_pool_guard?: AccountPoolGuardStatus; feishu_alert?: FeishuAlertStatus }>("/api/settings");
 }
 
 export async function updateSettingsConfig(settings: SettingsConfig) {
-  return httpRequest<{ config: SettingsConfig }>("/api/settings", {
+  return httpRequest<{ config: SettingsConfig; account_pool_guard?: AccountPoolGuardStatus; feishu_alert?: FeishuAlertStatus }>("/api/settings", {
     method: "POST",
     body: settings,
+  });
+}
+
+export async function fetchAccountPoolGuard() {
+  return httpRequest<{ account_pool_guard: AccountPoolGuardStatus }>("/api/account-pool-guard");
+}
+
+export async function testFeishuAlert(body: { webhook_url: string; secret?: string; keyword?: string }) {
+  return httpRequest<{ result: { ok: boolean; status: number; code: number; message: string; error?: string }; feishu_alert: FeishuAlertStatus }>("/api/feishu-alert/test", {
+    method: "POST",
+    body,
   });
 }
 

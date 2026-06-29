@@ -66,6 +66,47 @@ class RegisterService:
         with self._lock:
             return json.loads(json.dumps({**self._config, "logs": self._logs[-300:]}, ensure_ascii=False))
 
+    def is_running(self) -> bool:
+        with self._lock:
+            return bool(self._runner and self._runner.is_alive())
+
+    def validate_ready(self) -> tuple[bool, str]:
+        with self._lock:
+            mail = self._config.get("mail") if isinstance(self._config.get("mail"), dict) else {}
+            providers = mail.get("providers") if isinstance(mail, dict) else []
+            enabled_providers = [
+                item
+                for item in providers
+                if isinstance(item, dict) and bool(item.get("enable", True))
+            ] if isinstance(providers, list) else []
+            if not enabled_providers:
+                return False, "注册机邮箱 provider 未配置或未启用"
+            try:
+                from services.register import mail_provider
+
+                mail_provider._enabled_entries(mail)
+            except Exception as exc:
+                return False, f"注册机邮箱 provider 配置不完整：{exc}"
+            return True, ""
+
+    def start_from_guard(self, guard_config: dict) -> dict:
+        updates: dict[str, object] = {}
+        mode = str(guard_config.get("register_mode") or "available").strip().lower()
+        if mode not in {"available", "quota", "total"}:
+            mode = "available"
+        updates["mode"] = mode
+        if mode == "available":
+            updates["target_available"] = max(1, int(guard_config.get("register_target_available") or 10))
+        elif mode == "quota":
+            updates["target_quota"] = max(1, int(guard_config.get("register_target_quota") or 100))
+        with self._lock:
+            self._config = _normalize({**self._config, **updates})
+            self._inject_proxy_to_mail()
+            self._save()
+        result = self.start()
+        self._append_log("来源：账号池健康守护自动触发", "yellow")
+        return result
+
     def _inject_proxy_to_mail(self) -> None:
         proxy = str(self._config.get("proxy") or "").strip()
         if proxy and isinstance(self._config.get("mail"), dict):

@@ -8,8 +8,10 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from api.support import require_admin, require_identity, resolve_image_base_url
+from services.account_pool_guard_service import account_pool_guard_service
 from services.backup_service import BackupError, backup_service
 from services.config import config
+from services.feishu_alert_service import feishu_alert_service
 from services.image_service import delete_images, download_images_zip, get_image_download_response, get_image_response, get_thumbnail_response, list_images
 from services.image_storage_service import ImageStorageError, image_storage_service
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
@@ -23,6 +25,12 @@ class SettingsUpdateRequest(BaseModel):
 
 class ProxyTestRequest(BaseModel):
     url: str = ""
+
+
+class FeishuAlertTestRequest(BaseModel):
+    webhook_url: str = ""
+    secret: str = ""
+    keyword: str = "账号池告警"
 
 
 class ImageDeleteRequest(BaseModel):
@@ -65,15 +73,45 @@ def create_router(app_version: str) -> APIRouter:
     @router.get("/api/settings")
     async def get_settings(authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"config": config.get()}
+        return {
+            "config": config.get(),
+            "account_pool_guard": account_pool_guard_service.get_status(),
+            "feishu_alert": feishu_alert_service.get_status(),
+        }
 
     @router.post("/api/settings")
     async def save_settings(body: SettingsUpdateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
-            return {"config": config.update(body.model_dump(mode="python"))}
+            updated = config.update(body.model_dump(mode="python"))
+            return {
+                "config": updated,
+                "account_pool_guard": account_pool_guard_service.get_status(),
+                "feishu_alert": feishu_alert_service.get_status(),
+            }
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.get("/api/account-pool-guard")
+    async def get_account_pool_guard(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"account_pool_guard": account_pool_guard_service.get_status()}
+
+    @router.post("/api/feishu-alert/test")
+    async def test_feishu_alert_endpoint(body: FeishuAlertTestRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            result = await run_in_threadpool(
+                feishu_alert_service.send_test,
+                {
+                    "webhook_url": body.webhook_url.strip(),
+                    "secret": body.secret.strip(),
+                    "keyword": body.keyword.strip() or "账号池告警",
+                },
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        return {"result": result, "feishu_alert": feishu_alert_service.get_status()}
 
     @router.get("/api/images")
     async def get_images(request: Request, start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):
